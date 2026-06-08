@@ -1,0 +1,92 @@
+#include "../include/ipc.h"
+#include <fcntl.h>
+#include <errno.h>
+
+/* ─── Message Queue ─────────────────────────────────── */
+
+int create_msg_queue(void) {
+    key_t key = ftok("/tmp", 'P');
+    int mqid = msgget(key, IPC_CREAT | 0666);
+    if (mqid < 0) {
+        perror("[IPC] msgget failed");
+        exit(1);
+    }
+    printf("[IPC] Message queue created (id=%d)\n", mqid);
+    return mqid;
+}
+
+void send_task(int mqid, Task* task) {
+    if (msgsnd(mqid, task, sizeof(Task) - sizeof(long), 0) < 0) {
+        perror("[IPC] msgsnd failed");
+    }
+}
+
+int recv_task(int mqid, Task* task) {
+    /* retourne -1 si pas de message (ENOMSG) */
+    ssize_t r = msgrcv(mqid, task, sizeof(Task) - sizeof(long), 1, IPC_NOWAIT);
+    if (r < 0) {
+        if (errno == ENOMSG) return -1;
+        perror("[IPC] msgrcv failed");
+        return -1;
+    }
+    return 0;
+}
+
+void destroy_msg_queue(int mqid) {
+    msgctl(mqid, IPC_RMID, NULL);
+    printf("[IPC] Message queue destroyed\n");
+}
+
+/* ─── Shared Memory ─────────────────────────────────── */
+
+int create_shm(void) {
+    key_t key = ftok("/tmp", 'S');
+    int shm_id = shmget(key, sizeof(SharedData), IPC_CREAT | 0666);
+    if (shm_id < 0) {
+        perror("[IPC] shmget failed");
+        exit(1);
+    }
+    /* initialiser à zéro */
+    SharedData* ptr = attach_shm(shm_id);
+    ptr->total_processed = 0;
+    detach_shm(ptr);
+    printf("[IPC] Shared memory created (id=%d)\n", shm_id);
+    return shm_id;
+}
+
+SharedData* attach_shm(int shm_id) {
+    SharedData* ptr = (SharedData*)shmat(shm_id, NULL, 0);
+    if (ptr == (void*)-1) {
+        perror("[IPC] shmat failed");
+        exit(1);
+    }
+    return ptr;
+}
+
+void detach_shm(SharedData* ptr) {
+    shmdt(ptr);
+}
+
+void destroy_shm(int shm_id) {
+    shmctl(shm_id, IPC_RMID, NULL);
+    printf("[IPC] Shared memory destroyed\n");
+}
+
+/* ─── Log (protégé par sémaphore) ───────────────────── */
+
+void write_log(const char* outdir, int proc_id, int thread_id,
+               const char* fname, const char* status, sem_t* sem) {
+    char log_path[MAX_PATH];
+    snprintf(log_path, MAX_PATH, "%s/results.log", outdir);
+
+    sem_wait(sem);   /* entrée section critique */
+
+    FILE* f = fopen(log_path, "a");
+    if (f) {
+        fprintf(f, "[P%d-T%d] %s -> %s\n", proc_id, thread_id, fname, status);
+        fclose(f);
+    }
+
+    sem_post(sem);   /* sortie section critique */
+}
+
